@@ -1,0 +1,162 @@
+[
+  {
+    "slide_id": "PIT_01_00002_01",
+    "final_report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+    "frequency": 26,
+    "tile_count": 56,
+    "alternative_reports": [
+      {
+        "report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+        "count": 26
+      },
+      {
+        "report": "Lung, biopsy;\nNo tumor present.",
+        "count": 9
+      },
+      {
+        "report": "Breast, core needle biopsy;\nNo tumor present.",
+        "count": 7
+      }
+    ]
+  },
+  {
+    "slide_id": "PIT_01_00003_01",
+    "final_report": "Lung, biopsy;\nNo tumor present.",
+    "frequency": 15,
+    "tile_count": 62,
+    "alternative_reports": [
+      {
+        "report": "Lung, biopsy;\nNo tumor present.",
+        "count": 15
+      },
+      {
+        "report": "Breast, core needle biopsy;\nNo tumor present.",
+        "count": 13
+      },
+      {
+        "report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+        "count": 10
+      }
+    ]
+  },
+  {
+    "slide_id": "PIT_01_00004_01",
+    "final_report": "Breast, core needle biopsy;\nNo tumor present.",
+    "frequency": 13,
+    "tile_count": 62,
+    "alternative_reports": [
+      {
+        "report": "Breast, core needle biopsy;\nNo tumor present.",
+        "count": 13
+      },
+      {
+        "report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+        "count": 11
+      },
+      {
+        "report": "Breast, core needle biopsy;\n1. Invasive ductal carcinoma, grade 3\n2. Microcalcification\nNo tumor present.",
+        "count": 6
+      }
+    ]
+  },
+  {
+    "slide_id": "PIT_01_00005_01",
+    "final_report": "Breast, core needle biopsy;\nNo tumor present.",
+    "frequency": 143,
+    "tile_count": 419,
+    "alternative_reports": [
+      {
+        "report": "Breast, core needle biopsy;\nNo tumor present.",
+        "count": 143
+      },
+      {
+        "report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+        "count": 67
+      },
+      {
+        "report": "Muscle, biopsy;\nNo tumor present.",
+        "count": 43
+      }
+    ]
+  },
+  {
+    "slide_id": "PIT_01_00006_01",
+    "final_report": "Breast, core needle biopsy;\nNo tumor present.",
+    "frequency": 37,
+    "tile_count": 109,
+    "alternative_reports": [
+      {
+        "report": "Breast, core needle biopsy;\nNo tumor present.",
+        "count": 37
+      },
+      {
+        "report": "Muscle, biopsy;\nNo tumor present.",
+        "count": 9
+      },
+      {
+        "report": "Lung, biopsy;\nNo tumor present.",
+        "count": 7
+      }
+    ]
+  },
+  {
+    "slide_id": "PIT_01_00007_01",
+    "final_report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+    "frequency": 51,
+    "tile_count": 222,
+    "alternative_reports": [
+      {
+        "report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+        "count": 51
+      },
+      {
+        "report": "Breast, core needle biopsy;\n1. Invasive ductal carcinoma, grade 2\n2. Fibroadenoma",
+        "count": 15
+      },
+      {
+        "report": "Lung, biopsy;\nAcinic cell carcinoma\nNo tumor present.",
+        "count": 9
+      }
+    ]
+  },
+  {
+    "slide_id": "PIT_01_00008_01",
+    "final_report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+    "frequency": 16,
+    "tile_count": 29,
+    "alternative_reports": [
+      {
+        "report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+        "count": 16
+      },
+      {
+        "report": "Liver, biopsy;\nNo tumor present.",
+        "count": 3
+      },
+      {
+        "report": "Breast, core needle biopsy;\nNo tumor present.",
+        "count": 3
+      }
+    ]
+  },
+  {
+    "slide_id": "PIT_01_00009_01",
+    "final_report": "Breast, core needle biopsy;\nNo tumor present.",
+    "frequency": 39,
+    "tile_count": 91,
+    "alternative_reports": [
+      {
+        "report": "Breast, core needle biopsy;\nNo tumor present.",
+        "count": 39
+      },
+      {
+        "report": "Breast, core needle biopsy;\n1. Ductal carcinoma in situ, comedo type\n2. Microcalcification\nNo tumor present.",
+        "count": 17
+      },
+      {
+        "report": "Lung, biopsy;\nNo tumor present.",
+        "count": 6
+      }
+    ]
+  }
+]
