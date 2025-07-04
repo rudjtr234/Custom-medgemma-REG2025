@@ -1,2 +1,4 @@
 data/
 fintuning_model/
+*.png/
+*.jpg/
