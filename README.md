@@ -1,4 +1,16 @@
-# MedGemma Notebooks
+
+
+
+
+
+
+
+
+
+
+
+
+# MedGemma Notebooks (quick start)
 
 *   [Quick start with Hugging Face](quick_start_with_hugging_face.ipynb) -
     Example of generating responses from medical text and images by running the
