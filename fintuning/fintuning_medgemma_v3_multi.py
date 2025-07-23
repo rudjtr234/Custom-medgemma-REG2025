@@ -6,11 +6,23 @@ Fine‑tuning script for MedGemma (4‑bit QLoRA, multi‑image per sample)
 
 변경 및 개선 사항 (v0.2)
 -----------------------
-1. **Headless 환경 대응**
-   * `matplotlib` 백엔드를 **Agg**로 고정하여 GUI 창이 열려 멈추는 현상 제거.
-   * 시각화 단계에서 `plt.show()` 대신 `plt.savefig()` 후 즉시 `plt.close()` 처리.
-2. **CLI 플래그 추가**
-   * `--no_vis` : 샘플 프롬프트/이미지 시각화 단계 자체를 건너뛸 수 있음.
+1. 전처리 단계에서의 제대로 이미지 input 또는 json input이 제대로 들어가는지 현황파악 추가
+2. 단일 GPU에서만 쓰던 코드를 accelerate config를 통해서 멀티 gpu로 변환하여 학습속도 및 메모리를 증강
+3. 변경된 실행코드 
+
+CUDA_VISIBLE_DEVICES=0,1,3,4 accelerate launch   
+--mixed_precision fp16   
+fintuning_medgemma_v3_multi.py     
+--model_path /home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/medgemma-4b-it     
+--train_json /home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/data/preprocess_tile/make_json/train_json/train_json_clean.json     
+--epochs 3     
+--lr 3e-5     
+--rank 8     
+--no_vis
+
+4. json에서의 불필요한 공백 및 데이터 정제
+
+
 """
 
 # ────────────────────────────────────────────────
@@ -22,7 +34,6 @@ import torch
 from PIL import Image
 
 import matplotlib
-matplotlib.use("Agg")  # ← GUI 없는 서버에서도 멈추지 않도록
 import matplotlib.pyplot as plt
 
 from datasets import load_dataset
@@ -68,7 +79,7 @@ with accel.main_process_first():
     model = prepare_model_for_kbit_training(model)
 
 # ─── Gradient checkpointing 설정 ───────────────────────────
-# ① 먼저 전체 모듈의 체크포인트링을 **완전히 끄고**
+# ① 먼저 전체 모듈의 체크포인트링을 **완전히 끄고** 오류 문제 때문에 먼저끄는거 실행
 model.gradient_checkpointing_disable()
 
 # ② **Vision‑tower** 레이어에만 다시 켭니다.
