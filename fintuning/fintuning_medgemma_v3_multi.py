@@ -22,6 +22,9 @@ fintuning_medgemma_v3_multi.py
 
 4. json에서의 불필요한 공백 및 데이터 정제
 
+5. eval , train set 분리 추가
+
+6. GPU 4개 사용 NVIDIA RTX 6000 Ada 
 
 """
 
@@ -29,11 +32,10 @@ fintuning_medgemma_v3_multi.py
 # 0. Imports & CLI
 # ────────────────────────────────────────────────
 import os, mimetypes, datetime, argparse
-
 import torch
 from PIL import Image
-
-import matplotlib
+import random                         # ←★ 추가
+from evaluate import load as evload   # ←★ 추가import matplotlib
 import matplotlib.pyplot as plt
 
 from datasets import load_dataset
@@ -78,8 +80,9 @@ with accel.main_process_first():
     )
     model = prepare_model_for_kbit_training(model)
 
+
 # ─── Gradient checkpointing 설정 ───────────────────────────
-# ① 먼저 전체 모듈의 체크포인트링을 **완전히 끄고** 오류 문제 때문에 먼저끄는거 실행
+# ① 먼저 전체 모듈의 체크포인트링을 **완전히 끄고**
 model.gradient_checkpointing_disable()
 
 # ② **Vision‑tower** 레이어에만 다시 켭니다.
@@ -103,16 +106,31 @@ processor = AutoProcessor.from_pretrained(args.model_path)
 def is_valid(ex):
     return ex.get("image") and os.path.exists(ex["image"]) and ex.get("messages")
 
-print("\n[📂 데이터셋 로드]")
 with accel.main_process_first():
-    ds = load_dataset("json", data_files={"train": args.train_json})["train"].filter(is_valid)
-print(f"✅ 로드 완료. 총 샘플: {len(ds):,}")
+    ds_all = load_dataset("json", data_files={"train": args.train_json})["train"].filter(is_valid)
+
+print(f"✅ 전체 샘플: {len(ds_all):,}")
+
+# 9:1 shuffle split ---------------------------------------------------
+indices      = list(range(len(ds_all)))
+random.seed(42); random.shuffle(indices)
+cut          = int(len(indices) * 0.9)
+train_idx    = indices[:cut]
+val_idx      = indices[cut:]
+
+ds_train     = ds_all.select(train_idx)
+# fallback: HuggingFace Dataset select returns empty if indices=[]
+ds_val       = ds_all.select(val_idx) if val_idx else ds_all.select(indices[-1:])
+
+if accel.is_main_process:
+    print(f"✅ Train : {len(ds_train):,} | Val : {len(ds_val):,}")
+
 
 # (1) 샘플 프롬프트·이미지 시각 확인
 if not args.no_vis and accel.is_main_process:
     print("\n[🔎 샘플 시각화 & Prompt 확인]")
     for i in range(min(3, len(ds))):
-        ex = ds[i]
+        ex = ds_all[i]
         prompt = processor.apply_chat_template(ex["messages"], add_generation_prompt=False, tokenize=False).strip()
         print(f"\n─ Sample {i} ─\nPrompt:\n" + prompt)
         img_path = ex["image"]
@@ -121,7 +139,6 @@ if not args.no_vis and accel.is_main_process:
             plt.imshow(img)
             plt.title(f"Sample {i}")
             plt.axis("off")
-         #   plt.savefig(f"sanity_vis_{i}.png")  # 파일로 저장 후 닫기
             plt.close()
         else:
             print("⚠ 이미지 파일 없음:", img_path)
@@ -129,8 +146,8 @@ if not args.no_vis and accel.is_main_process:
 # (2) 유니크 라벨 다양성 체크
 print("\n[🧪 라벨 다양성 검사]")
 label_set = set()
-for i in range(min(1000, len(ds))):
-    for m in ds[i]["messages"]:
+for i in range(min(1000, len(ds_all))):
+    for m in ds_all[i]["messages"]:
         if m["role"] == "assistant":
             for c in m["content"]:
                 if c.get("text"):
@@ -142,7 +159,7 @@ if label_cnt < 2:
 
 # (3) Processor 테스트
 print("\n[⚙ Processor 마스킹 테스트]")
-_sample = [ds[i] for i in range(min(4, len(ds)))]
+_sample = [ds_all[i] for i in range(min(4, len(ds_all)))]
 texts = [processor.apply_chat_template(s["messages"], add_generation_prompt=False, tokenize=False).strip() for s in _sample]
 imgs = [[Image.open(s["image"]).convert("RGB")] for s in _sample]
 encoded = processor(text=texts, images=imgs, padding=True, return_tensors="pt")
@@ -164,7 +181,7 @@ def load_image(path: str):
 
 
 def collate(batch):
-    batch = [ex for ex in batch if is_valid(ex)] or [ds[0]]  # 빈 배치 방지
+    batch = [ex for ex in batch if is_valid(ex)] or [ds_all[0]]  # 빈 배치 방지
     texts, images = [], []
     for ex in batch:
         texts.append(processor.apply_chat_template(ex["messages"], add_generation_prompt=False, tokenize=False).strip())
@@ -186,38 +203,71 @@ def collate(batch):
     out["labels"] = labels
     return out
 
-# ────────────────────────────────────────────────
-# 5. Trainer 설정 & 학습
-# ────────────────────────────────────────────────
 
+
+# ─── Metrics ───────────────────────────────────
+bleu = evload("bleu")
+try:
+    import nltk; nltk.download("wordnet", quiet=True)
+    meteor = evload("meteor")
+except Exception:
+    meteor = None
+try:
+    clip_s = evload("microsoft/clip_score")   # hf hub id
+except Exception:
+    clip_s = None
+
+def compute_metrics(eval_pred):
+    preds, labels = eval_pred
+    preds_txt  = processor.batch_decode(preds, skip_special_tokens=True)
+    labels_txt = processor.batch_decode(labels, skip_special_tokens=True)
+    res = {"bleu": bleu.compute(predictions=preds_txt, references=[[t] for t in labels_txt])["bleu"]}
+    if meteor:
+        res["meteor"] = meteor.compute(predictions=preds_txt, references=[[t] for t in labels_txt])["meteor"]
+    if clip_s:
+        try:
+            imgs = [load_image(ds_val[i]["image"]) for i in range(len(preds_txt))]
+            res["clip"] = clip_s.compute(predictions=preds_txt, images=imgs)["clip_score"]
+        except Exception:
+            pass
+    return res
+
+
+# ─── Trainer ───────────────────────────────────
 stamp = datetime.datetime.now().strftime("%m%d_%H%M")
-sft_cfg = SFTConfig(
-    output_dir=f"qlora_ckpt_{stamp}",
-    num_train_epochs=args.epochs,
-    per_device_train_batch_size=4,
-    gradient_accumulation_steps=4,
-    learning_rate=args.lr,
-    lr_scheduler_type="cosine",
-    warmup_ratio=0.05,
-    logging_steps=50,
-    save_strategy="epoch",
-    fp16=True,
-    max_seq_length=1024,
-    dataloader_drop_last=True,
-    label_names=["labels"],
-    report_to=["tensorboard"],
+trainer = SFTTrainer(
+    model=model,
+    args=SFTConfig(
+        output_dir=f"qlora_ckpt_{stamp}",
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=12,
+        gradient_accumulation_steps=2,
+        learning_rate=args.lr,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.03,
+        fp16=True,
+        logging_steps=50,
+        save_strategy="steps",
+        eval_steps=500,         # 500 스텝마다 Val
+        dataloader_num_workers=4,
+        ddp_find_unused_parameters=True,
+        label_names=["labels"],
+        report_to=["tensorboard"],
+    ),
+    train_dataset=ds_train,
+    eval_dataset=ds_val,
+    compute_metrics=compute_metrics,
+    data_collator=collate,
 )
 
-trainer = SFTTrainer(model=model, args=sft_cfg, train_dataset=ds, data_collator=collate)
-
-print("\n[🚀 학습 시작]")
+if accel.is_main_process:
+    print("[🚀 학습 시작]")
 trainer.train()
 
-# ────────────────────────────────────────────────
-# 6. Save
-# ────────────────────────────────────────────────
+# ─── Save ──────────────────────────────────────
 accel.wait_for_everyone()
 if accel.is_main_process:
     out_dir = "/home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/fintuning_model/medgemma_2400_VIT_v0.1.1"
     trainer.save_model(out_dir)
     print("모델 저장 완료:", out_dir)
+
