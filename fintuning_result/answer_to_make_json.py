@@ -90,7 +90,7 @@ def merge_adapter_once():
             print(f"▶ 이미 병합된 모델이 존재합니다 → {MERGE_DIR}")
             return
         else:
-            print(f"⚠️ 병합 폴더는 있으나 모델 파일이 없습니다. 병합을 다시 시도합니다.")
+            print(f"경고 . 병합 폴더는 있으나 모델 파일이 없습니다. 병합을 다시 시도합니다.")
 
     print("▶ 어댑터 병합 시작…")
 
@@ -178,7 +178,7 @@ GEN_KWARGS = dict(
     num_beams          = 10,
     do_sample          = False,
     repetition_penalty = 1.2,
-    pad_token_id       = tokenizer.eos_token_id,  # ✅ 콤마 제거!
+    pad_token_id       = tokenizer.eos_token_id, 
     eos_token_id       = tokenizer.eos_token_id
 )
 # ──────────────────────────────────────────────────────────────
