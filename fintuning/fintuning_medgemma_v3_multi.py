@@ -32,6 +32,8 @@ CUDA_VISIBLE_DEVICES=0,1,3,4 accelerate launch \
   --rank 8 \
   --no_vis
 
+-----------
+```
 
 import argparse
 import datetime
