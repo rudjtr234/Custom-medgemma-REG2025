@@ -22,7 +22,7 @@ MedGemma 모델 QLoRA 기반 Fine-Tuning 스크립트 (v0.2, 멀티 이미지/�
 실행 예시:
 -----------
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,3,4 accelerate launch \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch \
   --mixed_precision fp16 \
   fintuning_medgemma_v3_multi.py \
   --model_path /path/to/medgemma-4b-it \
