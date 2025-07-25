@@ -1,190 +1,206 @@
 #!/usr/bin/env python
-# coding: utf-8
+# -*- coding: utf-8 -*-
 """
-Fine‑tuning script for MedGemma (4‑bit QLoRA, multi‑image per sample)
-====================================================================
+MedGemma 모델 QLoRA 기반 Fine-Tuning 스크립트 (v0.2, 멀티 이미지/샘플)
 
-변경 및 개선 사항 (v0.2)
------------------------
-1. 전처리 단계에서의 제대로 이미지 input 또는 json input이 제대로 들어가는지 현황파악 추가
-2. 단일 GPU에서만 쓰던 코드를 accelerate config를 통해서 멀티 gpu로 변환하여 학습속도 및 메모리를 증강
-3. 변경된 실행코드 
+개요:
+-----
+본 스크립트는 MedGemma 모델에 대해 4-bit QLoRA 방식을 적용하여 파인튜닝을 수행합니다. 
+단일 이미지뿐 아니라 복수 이미지 입력을 지원하며, 다중 GPU 환경에서의 안정성과 성능 개선을 중점으로 개선되었습니다.
 
-CUDA_VISIBLE_DEVICES=0,1,3,4 accelerate launch   
---mixed_precision fp16   
-fintuning_medgemma_v3_multi.py     
---model_path /home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/medgemma-4b-it     
---train_json /home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/data/preprocess_tile/make_json/train_json/train_json_clean.json     
---epochs 3     
---lr 3e-5     
---rank 8     
---no_vis
+주요 개선 사항:
+---------------
+1. 이미지 로딩 오류 방지를 위한 안전 로딩 (오류 시 검정 이미지 대체)
+2. BLEU 및 METEOR 기반 평가 지원 (분산 실행 시 CLIP Score 제외)
+3. dataloader_num_workers = 0 설정으로 다중 GPU 환경에서의 안정성 강화
+4. 전처리 단계에서의 JSON 입력 및 이미지 입력 상태 확인 추가
+5. JSON 내 불필요 공백 및 잘못된 텍스트 제거
+6. 학습용(train)과 평가용(eval) 데이터셋 분리
+7. accelerate 기반 멀티 GPU 학습 환경으로 전환 (단일 GPU 코드 → DDP/Accelerator로 통합)
+8. 사용 예시 포함 (총 8개 GPU: NVIDIA RTX 6000 Ada 사용)
 
-4. json에서의 불필요한 공백 및 데이터 정제
+실행 예시:
+-----------
+```bash
+CUDA_VISIBLE_DEVICES=0,1,3,4 accelerate launch \
+  --mixed_precision fp16 \
+  fintuning_medgemma_v3_multi.py \
+  --model_path /path/to/medgemma-4b-it \
+  --train_json /path/to/train_json_clean.json \
+  --epochs 3 \
+  --lr 3e-5 \
+  --rank 8 \
+  --no_vis
 
-5. eval , train set 분리 추가
 
-6. GPU 4개 사용 NVIDIA RTX 6000 Ada 
+import argparse
+import datetime
+import os
+import random
+import mimetypes
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-"""
-
-# ────────────────────────────────────────────────
-# 0. Imports & CLI
-# ────────────────────────────────────────────────
-import os, mimetypes, datetime, argparse
 import torch
 from PIL import Image
-import random                         # ←★ 추가
-from evaluate import load as evload   # ←★ 추가import matplotlib
-import matplotlib.pyplot as plt
-
-from datasets import load_dataset
 from accelerate import Accelerator
+from datasets import load_dataset
+from evaluate import load as evload
 from transformers import (
-    AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig,
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    BitsAndBytesConfig,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTConfig, SFTTrainer
 
-# ────────────────────────────────────────────────
-# 1. CLI
-# ────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Fine‑tune MedGemma with QLoRA")
-parser.add_argument("--model_path", default="/home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/medgemma-4b-it")
-parser.add_argument("--train_json", default="/home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/data/preprocess_tile/make_json/train_json/train_json_clean.json")
-parser.add_argument("--epochs", type=int, default=3)
-parser.add_argument("--lr", type=float, default=5e-5)
-parser.add_argument("--rank", type=int, default=8)
-parser.add_argument("--no_vis", action="store_true", help="Disable sample visualization for headless run")
-args = parser.parse_args()
-
-# ────────────────────────────────────────────────
-# 2. Model & LoRA 준비
-# ────────────────────────────────────────────────
-bnb_cfg = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_quant_storage=torch.float32,
-)
-
-accel = Accelerator(mixed_precision="fp16")
-
-with accel.main_process_first():
-    model = AutoModelForImageTextToText.from_pretrained(
-        args.model_path,
-        quantization_config=bnb_cfg,
-        torch_dtype=torch.float16,
-        attn_implementation="eager",
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fine‑tune MedGemma with QLoRA")
+    parser.add_argument(
+        "--model_path",
+        default="medgemma-4b-it",
+        help="Path to the pretrained MedGemma model.",
     )
-    model = prepare_model_for_kbit_training(model)
+    parser.add_argument(
+        "--train_json",
+        required=True,
+        help="JSON file containing training data with image paths and messages.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=5e-5,
+        help="Learning rate.",
+    )
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=8,
+        help="LoRA rank (r).",
+    )
+    parser.add_argument(
+        "--no_vis",
+        action="store_true",
+        help="If set, sample visualisation and checks are skipped.",
+    )
+    return parser.parse_args()
 
+def prepare_model_and_processor(
+    model_path: str,
+    lora_rank: int,
+    accelerator: Accelerator,
+) -> Tuple[Any, Any]:
+    bnb_cfg = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_quant_storage=torch.float32,
+    )
+    with accelerator.main_process_first():
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_path,
+            quantization_config=bnb_cfg,
+            torch_dtype=torch.float16,
+            attn_implementation="eager",
+        )
+        model = prepare_model_for_kbit_training(model)
 
-# ─── Gradient checkpointing 설정 ───────────────────────────
-# ① 먼저 전체 모듈의 체크포인트링을 **완전히 끄고**
-model.gradient_checkpointing_disable()
+    model.gradient_checkpointing_disable()
+    vt = model.vision_tower
+    vision_layers = (
+        vt.encoder.layers
+        if hasattr(vt, "encoder")
+        else vt.vision_model.encoder.layers
+    )
+    for blk in vision_layers:
+        blk.gradient_checkpointing = True
 
-# ② **Vision‑tower** 레이어에만 다시 켭니다.
-vt = model.vision_tower
-vision_layers = vt.encoder.layers if hasattr(vt, "encoder") else vt.vision_model.encoder.layers
-for blk in vision_layers:
-    blk.gradient_checkpointing = True
+    targets = [name for name, module in model.named_modules() if isinstance(module, torch.nn.Linear)]
+    lora_cfg = LoraConfig(
+        r=lora_rank,
+        lora_alpha=lora_rank * 4,
+        lora_dropout=0.05,
+        target_modules=targets,
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_cfg)
 
-# LoRA 설정
-targets = [n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear)]
-lora_cfg = LoraConfig(r=args.rank, lora_alpha=args.rank * 4, lora_dropout=0.05, target_modules=targets, task_type="CAUSAL_LM")
-model = get_peft_model(model, lora_cfg)
-model.print_trainable_parameters()
+    processor = AutoProcessor.from_pretrained(model_path)
+    return model, processor
 
-processor = AutoProcessor.from_pretrained(args.model_path)
+def load_and_split_dataset(
+    json_path: str,
+    accelerator: Accelerator,
+) -> Tuple[Any, Any, Any]:
+    def is_valid(example: Dict[str, Any]) -> bool:
+        return (
+            example.get("image")
+            and os.path.exists(example["image"])
+            and example.get("messages")
+        )
 
-# ────────────────────────────────────────────────
-# 3. Dataset 로드 & Sanity‑check
-# ────────────────────────────────────────────────
+    with accelerator.main_process_first():
+        ds_all = load_dataset("json", data_files={"train": json_path})["train"].filter(is_valid)
 
-def is_valid(ex):
-    return ex.get("image") and os.path.exists(ex["image"]) and ex.get("messages")
+    indices = list(range(len(ds_all)))
+    random.seed(42)
+    random.shuffle(indices)
+    cut = int(len(indices) * 0.9)
+    train_idx = indices[:cut]
+    val_idx = indices[cut:] or indices[-1:]
 
-with accel.main_process_first():
-    ds_all = load_dataset("json", data_files={"train": args.train_json})["train"].filter(is_valid)
+    ds_train = ds_all.select(train_idx)
+    ds_val = ds_all.select(val_idx)
 
-print(f"✅ 전체 샘플: {len(ds_all):,}")
+    if accelerator.is_main_process:
+        print(f"Total samples: {len(ds_all):,}")
+        print(f"Train: {len(ds_train):,} | Val: {len(ds_val):,}")
 
-# 9:1 shuffle split ---------------------------------------------------
-indices      = list(range(len(ds_all)))
-random.seed(42); random.shuffle(indices)
-cut          = int(len(indices) * 0.9)
-train_idx    = indices[:cut]
-val_idx      = indices[cut:]
+    return ds_train, ds_val, ds_all
 
-ds_train     = ds_all.select(train_idx)
-# fallback: HuggingFace Dataset select returns empty if indices=[]
-ds_val       = ds_all.select(val_idx) if val_idx else ds_all.select(indices[-1:])
-
-if accel.is_main_process:
-    print(f"✅ Train : {len(ds_train):,} | Val : {len(ds_val):,}")
-
-
-# (1) 샘플 프롬프트·이미지 시각 확인
-if not args.no_vis and accel.is_main_process:
-    print("\n[🔎 샘플 시각화 & Prompt 확인]")
-    for i in range(min(3, len(ds))):
-        ex = ds_all[i]
-        prompt = processor.apply_chat_template(ex["messages"], add_generation_prompt=False, tokenize=False).strip()
-        print(f"\n─ Sample {i} ─\nPrompt:\n" + prompt)
-        img_path = ex["image"]
-        if os.path.exists(img_path):
-            img = Image.open(img_path).convert("RGB")
-            plt.imshow(img)
-            plt.title(f"Sample {i}")
-            plt.axis("off")
-            plt.close()
-        else:
-            print("⚠ 이미지 파일 없음:", img_path)
-
-# (2) 유니크 라벨 다양성 체크
-print("\n[🧪 라벨 다양성 검사]")
-label_set = set()
-for i in range(min(1000, len(ds_all))):
-    for m in ds_all[i]["messages"]:
-        if m["role"] == "assistant":
-            for c in m["content"]:
-                if c.get("text"):
-                    label_set.add(c["text"].strip())
-label_cnt = len(label_set)
-print(f"유니크 라벨 수: {label_cnt}")
-if label_cnt < 2:
-    print("⚠ 경고: 모든 샘플이 동일한 라벨을 갖고 있을 가능성이 높습니다.")
-
-# (3) Processor 테스트
-print("\n[⚙ Processor 마스킹 테스트]")
-_sample = [ds_all[i] for i in range(min(4, len(ds_all)))]
-texts = [processor.apply_chat_template(s["messages"], add_generation_prompt=False, tokenize=False).strip() for s in _sample]
-imgs = [[Image.open(s["image"]).convert("RGB")] for s in _sample]
-encoded = processor(text=texts, images=imgs, padding=True, return_tensors="pt")
-labels = encoded["input_ids"].clone()
-labels[labels == processor.tokenizer.pad_token_id] = -100
-label_tokens = (labels != -100).sum().item()
-print(f"유효 라벨 토큰 수: {label_tokens}")
-if label_tokens == 0:
-    raise ValueError("❌ 모든 라벨이 -100으로 마스킹되었습니다. 학습 불가!")
-print("✅ Processor 테스트 통과")
-
-# ────────────────────────────────────────────────
-# 4. Collate 함수
-# ────────────────────────────────────────────────
-
-def load_image(path: str):
+def load_image(path: str) -> Any:
+    """
+    Safely load an image or tensor from disk. If loading fails, return
+    a black placeholder image instead of raising an exception.
+    """
     mime, _ = mimetypes.guess_type(path)
-    return Image.open(path).convert("RGB") if mime and mime.startswith("image") else torch.load(path, map_location="cpu")
+    try:
+        if mime and mime.startswith("image"):
+            return Image.open(path).convert("RGB")
+        return torch.load(path, map_location="cpu")
+    except Exception as e:
+        print(f"[WARN] Failed to load '{path}': {e}. Using fallback image.")
+        return Image.new("RGB", (224, 224), color="black")
 
+def collate_fn(
+    batch: Sequence[Dict[str, Any]],
+    processor: Any,
+    ds_all: Any,
+) -> Dict[str, Any]:
+    def is_valid(example: Dict[str, Any]) -> bool:
+        return (
+            example.get("image")
+            and os.path.exists(example["image"])
+            and example.get("messages")
+        )
 
-def collate(batch):
-    batch = [ex for ex in batch if is_valid(ex)] or [ds_all[0]]  # 빈 배치 방지
-    texts, images = [], []
+    batch = [ex for ex in batch if is_valid(ex)] or [ds_all[0]]
+    texts: List[str] = []
+    images: List[List[Any]] = []
     for ex in batch:
-        texts.append(processor.apply_chat_template(ex["messages"], add_generation_prompt=False, tokenize=False).strip())
+        texts.append(
+            processor.apply_chat_template(
+                ex["messages"],
+                add_generation_prompt=False,
+                tokenize=False,
+            ).strip()
+        )
         images.append([load_image(ex["image"])])
 
     out = processor(text=texts, images=images, padding=True, return_tensors="pt")
@@ -194,7 +210,8 @@ def collate(batch):
     start_id = processor.tokenizer.convert_tokens_to_ids("<start_of_image>")
     soft_id = processor.tokenizer.convert_tokens_to_ids("<image_soft_token>")
     for i, ids in enumerate(out["input_ids"]):
-        for p in (ids == start_id).nonzero(as_tuple=True)[0]:
+        positions = (ids == start_id).nonzero(as_tuple=True)[0]
+        for p in positions:
             q = p + 1
             while q < ids.size(0) and soft_id <= ids[q] < soft_id + 256:
                 q += 1
@@ -203,71 +220,169 @@ def collate(batch):
     out["labels"] = labels
     return out
 
+def load_metrics() -> Tuple[Any, Optional[Any]]:
+    """
+    Load evaluation metrics. Returns BLEU and METEOR (if available).
+    CLIP score is omitted to avoid image loading in metrics.
+    """
+    bleu = evload("bleu")
+    try:
+        import nltk  # type: ignore
+        nltk.download("wordnet", quiet=True)
+        meteor = evload("meteor")
+    except Exception:
+        meteor = None
+    return bleu, meteor
+
+def compute_metrics_factory(
+    processor: Any,
+    bleu_metric: Any,
+    meteor_metric: Optional[Any],
+) -> Any:
+    def compute_metrics(eval_pred: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, float]:
+        preds, labels = eval_pred
+        preds_txt = processor.batch_decode(preds, skip_special_tokens=True)
+        labels_txt = processor.batch_decode(labels, skip_special_tokens=True)
+        results = {
+            "bleu": bleu_metric.compute(
+                predictions=preds_txt,
+                references=[[t] for t in labels_txt],
+            )["bleu"]
+        }
+        if meteor_metric is not None:
+            results["meteor"] = meteor_metric.compute(
+                predictions=preds_txt,
+                references=[[t] for t in labels_txt],
+            )["meteor"]
+        return results
+    return compute_metrics
 
 
-# ─── Metrics ───────────────────────────────────
-bleu = evload("bleu")
-try:
-    import nltk; nltk.download("wordnet", quiet=True)
-    meteor = evload("meteor")
-except Exception:
-    meteor = None
-try:
-    clip_s = evload("microsoft/clip_score")   # hf hub id
-except Exception:
-    clip_s = None
+from transformers import TrainerCallback, TrainerState, TrainerControl, TrainingArguments
 
-def compute_metrics(eval_pred):
-    preds, labels = eval_pred
-    preds_txt  = processor.batch_decode(preds, skip_special_tokens=True)
-    labels_txt = processor.batch_decode(labels, skip_special_tokens=True)
-    res = {"bleu": bleu.compute(predictions=preds_txt, references=[[t] for t in labels_txt])["bleu"]}
-    if meteor:
-        res["meteor"] = meteor.compute(predictions=preds_txt, references=[[t] for t in labels_txt])["meteor"]
-    if clip_s:
-        try:
-            imgs = [load_image(ds_val[i]["image"]) for i in range(len(preds_txt))]
-            res["clip"] = clip_s.compute(predictions=preds_txt, images=imgs)["clip_score"]
-        except Exception:
-            pass
-    return res
+class PrintLossCallback(TrainerCallback):
+    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+        if logs is not None and "loss" in logs:
+            print(f"[Step {state.global_step}] Training loss: {logs['loss']:.4f}")
+
+class PrintEvalCallback(TrainerCallback):
+    def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs):
+        print(f"\n[✅ Evaluation @ Step {state.global_step}]")
+        for k, v in metrics.items():
+            if isinstance(v, float):
+                print(f"  {k}: {v:.4f}")
+            else:
+                print(f"  {k}: {v}")
 
 
-# ─── Trainer ───────────────────────────────────
-stamp = datetime.datetime.now().strftime("%m%d_%H%M")
-trainer = SFTTrainer(
-    model=model,
-    args=SFTConfig(
-        output_dir=f"qlora_ckpt_{stamp}",
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=12,
-        gradient_accumulation_steps=2,
-        learning_rate=args.lr,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
-        fp16=True,
-        logging_steps=50,
-        save_strategy="steps",
-        eval_steps=500,         # 500 스텝마다 Val
-        dataloader_num_workers=4,
-        ddp_find_unused_parameters=True,
-        label_names=["labels"],
-        report_to=["tensorboard"],
-    ),
-    train_dataset=ds_train,
-    eval_dataset=ds_val,
-    compute_metrics=compute_metrics,
-    data_collator=collate,
-)
+def main() -> None:
+    args = parse_args()
+    accelerator = Accelerator(mixed_precision="fp16")
+    model, processor = prepare_model_and_processor(
+        model_path=args.model_path,
+        lora_rank=args.rank,
+        accelerator=accelerator,
+    )
+    ds_train, ds_val, ds_all = load_and_split_dataset(
+        json_path=args.train_json,
+        accelerator=accelerator,
+    )
 
-if accel.is_main_process:
-    print("[🚀 학습 시작]")
-trainer.train()
+    if not args.no_vis and accelerator.is_main_process:
+        unique_labels = set()
+        for i in range(min(1000, len(ds_all))):
+            for message in ds_all[i]["messages"]:
+                if message.get("role") == "assistant":
+                    for content in message.get("content", []):
+                        text = content.get("text")
+                        if text:
+                            unique_labels.add(text.strip())
+        label_count = len(unique_labels)
+        print(f"Unique labels: {label_count}")
+        if label_count < 2:
+            print("Warning: low label diversity detected. All samples may share the same label.")
+        sample_batch = [ds_all[i] for i in range(min(4, len(ds_all)))]
+        texts = [
+            processor.apply_chat_template(
+                s["messages"],
+                add_generation_prompt=False,
+                tokenize=False,
+            ).strip()
+            for s in sample_batch
+        ]
+        images = [[load_image(s["image"])] for s in sample_batch]
+        encoded = processor(
+            text=texts,
+            images=images,
+            padding=True,
+            return_tensors="pt",
+        )
+        labels = encoded["input_ids"].clone()
+        labels[labels == processor.tokenizer.pad_token_id] = -100
+        valid_tokens = (labels != -100).sum().item()
+        if valid_tokens == 0:
+            raise ValueError("All labels were masked to -100. Check your dataset and processor.")
+        print("Processor masking test passed.")
 
-# ─── Save ──────────────────────────────────────
-accel.wait_for_everyone()
-if accel.is_main_process:
-    out_dir = "/home/mts/ssd_16tb/member/jks/medgemma_reg2025/notebooks/fintuning_model/medgemma_2400_VIT_v0.1.1"
-    trainer.save_model(out_dir)
-    print("모델 저장 완료:", out_dir)
+    bleu_metric, meteor_metric = load_metrics()
+    compute_metrics = compute_metrics_factory(
+        processor=processor,
+        bleu_metric=bleu_metric,
+        meteor_metric=meteor_metric,
+    )
+
+    timestamp = datetime.datetime.now().strftime("%m%d_%H%M")
+    output_dir = os.path.join(
+        os.path.dirname(args.train_json),
+        f"finetuned_medgemma_qlora_{timestamp}",
+    )
+
+
+
+    trainer = SFTTrainer(
+        model=model,
+        args=SFTConfig(
+            output_dir=output_dir,
+            num_train_epochs=args.epochs,
+            per_device_train_batch_size=12,
+            gradient_accumulation_steps=2,
+            learning_rate=args.lr,
+            lr_scheduler_type="cosine",
+            warmup_ratio=0.03,
+            fp16=True,
+            logging_steps=50,
+            save_strategy="steps",
+            save_steps=2000,
+            eval_steps=500,
+            dataloader_num_workers=0,  # use single worker for robust data loading
+            ddp_find_unused_parameters=True,
+            max_grad_norm=1.0,
+            label_names=["labels"],
+            report_to=["tensorboard"],
+        ),
+        train_dataset=ds_train,
+        eval_dataset=ds_val,
+        compute_metrics=compute_metrics,
+        data_collator=lambda batch: collate_fn(batch, processor, ds_all),
+        callbacks=[PrintLossCallback(), PrintEvalCallback()],
+    )
+
+    if accelerator.is_main_process:
+        print("Starting training...")
+    trainer.train()
+
+    final_out_dir = os.path.join(
+        os.path.dirname(args.train_json),
+        f"medgemma_final_v.0.1.0",
+    )
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        model.save_pretrained(final_out_dir, safe_serialization=True)
+        print(f"Adapter saved to {final_out_dir} as safetensors")
+
+if __name__ == "__main__":
+    main()
+
+
+
 
